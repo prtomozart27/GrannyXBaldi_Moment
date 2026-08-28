@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Araba Yarışı - PC</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
+        body { overflow: hidden; background: #000; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        
+        .overlay {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(15, 15, 26, 0.95); display: flex;
+            flex-direction: column; justify-content: center; align-items: center; z-index: 100;
+        }
+        h1 { color: #fff; font-size: 36px; margin-bottom: 20px; text-shadow: 0 0 10px #00d2d3; }
+        .btn {
+            background: linear-gradient(45deg, #ff4757, #ff6b81); color: #fff; border: none;
+            padding: 14px 35px; margin: 8px; font-size: 18px; font-weight: bold;
+            border-radius: 30px; cursor: pointer; box-shadow: 0 4px 15px rgba(255,71,87,0.4);
+            transition: all 0.2s ease; width: 260px; text-align: center;
+        }
+        .btn:hover { transform: translateY(-3px); box-shadow: 0 6px 20px rgba(255,71,87,0.6); }
+
+        #roomCodeDisplay {
+            font-size: 40px; font-weight: bold; color: #00ff88; letter-spacing: 4px;
+            background: rgba(255,255,255,0.05); padding: 10px 30px; border-radius: 15px;
+            border: 2px solid #00ff88; margin: 15px 0; text-shadow: 0 0 15px #00ff88;
+        }
+
+        #ui {
+            position: absolute; top: 20px; left: 20px; color: #fff;
+            background: rgba(0,0,0,0.6); padding: 12px 20px; border-radius: 12px;
+            display: none; font-size: 16px; border: 1px solid rgba(255,255,255,0.2); z-index: 10;
+        }
+        #speedometer { font-size: 24px; font-weight: bold; color: #00ff88; }
+
+        /* Sağ Üst Mini Harita (Minimap) */
+        #minimap {
+            position: absolute; top: 20px; right: 20px; width: 130px; height: 130px;
+            background: rgba(0, 0, 0, 0.7); border: 2px solid rgba(255, 255, 255, 0.3);
+            border-radius: 50%; display: none; z-index: 10;
+        }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+</head>
+<body>
+
+    <div id="mainMenu" class="overlay">
+        <h1>ARABA YARIŞI (PC)</h1>
+        <div id="roomCodeDisplay">YÜKLENİYOR...</div>
+        <p style="color: #aaa; margin-bottom: 15px;">Telefondan bu kodu girerek bağlanabilirsiniz.</p>
+        <button class="btn" id="startBtn" style="display:none;" onclick="launchGame(false)">ÇOK OYUNCULU BAŞLAT</button>
+        <button class="btn" style="background: #2ed573;" onclick="launchGame(true)">TEK OYUNCULU (ANTRENMAN)</button>
+    </div>
+
+    <div id="pauseMenu" class="overlay" style="display:none;">
+        <h1>OYUN DURDURULDU</h1>
+        <button class="btn" onclick="togglePause()">DEVAM ET</button>
+        <button class="btn" style="background: #576574;" onclick="location.reload()">ÇIKIŞ</button>
+    </div>
+
+    <div id="ui">HIZ: <span id="speedometer">0</span> KM/H</div>
+    <canvas id="minimap" width="130" height="130"></canvas>
+
+    <script>
+        let peer, conn, isPaused = false, isSinglePlayer = false;
+        let otherPlayerMesh;
+        const keys = {};
+
+        const roomCode = Math.floor(1000 + Math.random() * 9000).toString();
+        peer = new Peer('race-' + roomCode);
+
+        peer.on('open', () => {
+            document.getElementById('roomCodeDisplay').innerText = roomCode;
+        });
+
+        peer.on('connection', connection => {
+            conn = connection;
+            document.getElementById('roomCodeDisplay').innerText = "BAĞLANDI!";
+            document.getElementById('roomCodeDisplay').style.color = "#00ff88";
+            document.getElementById('startBtn').style.display = "block";
+            
+            conn.on('data', data => {
+                if (otherPlayerMesh && !isSinglePlayer) {
+                    otherPlayerMesh.position.set(data.x, 0, data.z);
+                    otherPlayerMesh.rotation.y = data.angle;
+                    rotateWheels(otherPlayerMesh, data.speed);
+                }
+            });
+        });
+
+        function launchGame(single) {
+            isSinglePlayer = single;
+            document.getElementById('mainMenu').style.display = 'none';
+            document.getElementById('ui').style.display = 'block';
+            document.getElementById('minimap').style.display = 'block';
+            initGame();
+        }
+
+        function togglePause() {
+            isPaused = !isPaused;
+            document.getElementById('pauseMenu').style.display = isPaused ? 'flex' : 'none';
+        }
+
+        document.addEventListener('keydown', e => {
+            keys[e.key] = true;
+            if (e.key === 'p' || e.key === 'P' || e.key === 'Escape') togglePause();
+        });
+        document.addEventListener('keyup', e => keys[e.key] = false);
+
+        let scene, camera, renderer, playerCar;
+        let walls = [];
+        const trackRadiusOuter = 220, trackRadiusInner = 140;
+
+        function initGame() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x0f0f1a);
+
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+            scene.add(ambientLight);
+
+            const sun = new THREE.DirectionalLight(0xffffff, 0.9);
+            sun.position.set(100, 150, 50);
+            scene.add(sun);
+
+            const ground = new THREE.Mesh(
+                new THREE.PlaneGeometry(1000, 1000),
+                new THREE.MeshStandardMaterial({ color: 0x111115 })
+            );
+            ground.rotation.x = -Math.PI / 2;
+            scene.add(ground);
+
+            createTrack();
+
+            playerCar = createSportCar(0x00d2d3);
+            playerCar.position.set(180, 0, 0);
+            scene.add(playerCar);
+
+            if (!isSinglePlayer) {
+                otherPlayerMesh = createSportCar(0xff4757);
+                otherPlayerMesh.position.set(180, 0, 10);
+                scene.add(otherPlayerMesh);
+            }
+
+            animate();
+        }
+
+        function createTrack() {
+            const trackGeo = new THREE.RingGeometry(trackRadiusInner, trackRadiusOuter, 64);
+            const trackMat = new THREE.MeshStandardMaterial({ color: 0x222225, side: THREE.DoubleSide });
+            const track = new THREE.Mesh(trackGeo, trackMat);
+            track.rotation.x = -Math.PI / 2;
+            track.position.y = 0.02;
+            scene.add(track);
+
+            createBarrierRing(trackRadiusInner - 2, 80);
+            createBarrierRing(trackRadiusOuter + 2, 120);
+        }
+
+        function createBarrierRing(radius, count) {
+            const mat = new THREE.MeshStandardMaterial({ color: 0x576574 });
+            for (let i = 0; i < count; i++) {
+                const angle = (i / count) * Math.PI * 2;
+                const wall = new THREE.Mesh(new THREE.BoxGeometry(6, 3, 6), mat);
+                wall.position.set(Math.cos(angle) * radius, 1.5, Math.sin(angle) * radius);
+                scene.add(wall);
+                walls.push(new THREE.Box3().setFromObject(wall));
+            }
+        }
+
+        function createSportCar(color) {
+            const car = new THREE.Group();
+            const bodyMat = new THREE.MeshStandardMaterial({ color: color, roughness: 0.3 });
+            
+            const body = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.8, 4.5), bodyMat);
+            body.position.y = 0.6;
+            car.add(body);
+
+            const cabin = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.6, 2.2), new THREE.MeshStandardMaterial({ color: 0x111111 }));
+            cabin.position.set(0, 1.1, -0.2);
+            car.add(cabin);
+
+            const spoiler = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.1, 0.6), bodyMat);
+            spoiler.position.set(0, 1.2, -2.1);
+            car.add(spoiler);
+
+            car.wheels = [];
+            const wheelGeo = new THREE.CylinderGeometry(0.4, 0.4, 0.3, 16);
+            const wheelMat = new THREE.MeshStandardMaterial({ color: 0x0a0a0a });
+            
+            [[-1.1, 0.4, 1.3], [1.1, 0.4, 1.3], [-1.1, 0.4, -1.3], [1.1, 0.4, -1.3]].forEach(pos => {
+                const wheel = new THREE.Mesh(wheelGeo, wheelMat);
+                wheel.rotation.z = Math.PI / 2;
+                wheel.position.set(...pos);
+                car.add(wheel);
+                car.wheels.push(wheel);
+            });
+
+            return car;
+        }
+
+        function rotateWheels(carMesh, currentSpeed) {
+            if (carMesh && carMesh.wheels) {
+                carMesh.wheels.forEach(w => w.rotation.x += currentSpeed * 0.5);
+            }
+        }
+
+        let speed = 0, angle = 0;
+        const maxSpeed = 1.2, accel = 0.025, friction = 0.97;
+
+        function checkWallCollision(nextX, nextZ) {
+            const carBox = new THREE.Box3();
+            const tempCar = playerCar.clone();
+            tempCar.position.set(nextX, playerCar.position.y, nextZ);
+            carBox.setFromObject(tempCar);
+
+            for (let wallBox of walls) {
+                if (carBox.intersectsBox(wallBox)) return true;
+            }
+            return false;
+        }
+
+        function updateMinimap() {
+            const canvas = document.getElementById('minimap');
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            const scale = 0.25;
+            const center = canvas.width / 2;
+
+            // Pist Çizimi
+            ctx.strokeStyle = '#444';
+            ctx.lineWidth = (trackRadiusOuter - trackRadiusInner) * scale;
+            ctx.beginPath();
+            ctx.arc(center, center, ((trackRadiusOuter + trackRadiusInner) / 2) * scale, 0, Math.PI * 2);
+            ctx.stroke();
+
+            // Kendi Araban (Mavi)
+            ctx.fillStyle = '#00d2d3';
+            ctx.beginPath();
+            ctx.arc(center + playerCar.position.x * scale, center + playerCar.position.z * scale, 4, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Rakip Araba (Kırmızı)
+            if (otherPlayerMesh && !isSinglePlayer) {
+                ctx.fillStyle = '#ff4757';
+                ctx.beginPath();
+                ctx.arc(center + otherPlayerMesh.position.x * scale, center + otherPlayerMesh.position.z * scale, 4, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            if (isPaused) return;
+
+            if (keys['ArrowUp'] || keys['w'] || keys['W']) { if (speed < maxSpeed) speed += accel; }
+            else if (keys['ArrowDown'] || keys['s'] || keys['S']) { if (speed > -maxSpeed / 2) speed -= accel; }
+            else { speed *= friction; }
+
+            if (Math.abs(speed) > 0.01) {
+                const dir = speed > 0 ? 1 : -1;
+                if (keys['ArrowLeft'] || keys['a'] || keys['A']) angle += 0.035 * dir;
+                if (keys['ArrowRight'] || keys['d'] || keys['D']) angle -= 0.035 * dir;
+            }
+
+            const nextX = playerCar.position.x + Math.sin(angle) * speed;
+            const nextZ = playerCar.position.z + Math.cos(angle) * speed;
+
+            if (!checkWallCollision(nextX, nextZ)) {
+                playerCar.position.x = nextX;
+                playerCar.position.z = nextZ;
+            } else {
+                speed = -speed * 0.5;
+            }
+
+            playerCar.rotation.y = angle;
+            rotateWheels(playerCar, speed);
+
+            if (conn && conn.open && !isSinglePlayer) {
+                conn.send({ x: playerCar.position.x, z: playerCar.position.z, angle: angle, speed: speed });
+            }
+
+            const camOffset = new THREE.Vector3(-Math.sin(angle) * 14, 7, -Math.cos(angle) * 14);
+            camera.position.copy(playerCar.position).add(camOffset);
+            camera.lookAt(playerCar.position.x, playerCar.position.y + 1, playerCar.position.z);
+
+            document.getElementById('speedometer').innerText = Math.round(Math.abs(speed) * 180);
+            updateMinimap();
+            renderer.render(scene, camera);
+        }
+
+        window.addEventListener('resize', () => {
+            if (camera && renderer) {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            }
+        });
+    </script>
+</body>
+</html>
